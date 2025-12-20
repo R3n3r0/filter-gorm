@@ -1,10 +1,15 @@
 package filter
 
-import "time"
+import (
+	"time"
+
+	"github.com/R3n3r0/filter-gorm/example/models/filter/base_filters"
+)
 
 type GroupFilter struct {
-	ID         uint       `json:"id" filter:"1"`
-	Name       string     `json:"name" filter:"1" searchable:"1"`
+	base_filters.BaseNameFilter
+	//ID         uint       `json:"id" filter:"1"`
+	//Name       string     `json:"name" filter:"1" searchable:"1"`
 	CreatedAt  *time.Time `json:"created_at" filter:"2"` // Filtro per la data di creazione
 	UpdatedAt  *time.Time `json:"updated_at" filter:"2"` // Filtro per la data di aggiornamento
 	Permission string     `json:"permission" filter:"1" field_filter:"name"`

@@ -3,9 +3,10 @@ package filter_helper
 import (
 	"errors"
 	"fmt"
-	"gorm.io/gorm"
 	"reflect"
 	"strings"
+
+	"gorm.io/gorm"
 )
 
 type FilterService struct {
@@ -367,6 +368,7 @@ func (f *FilterService) toStruct(val interface{}) interface{} {
 }
 func (f *FilterService) CreateFilterPagination(filter interface{}, model interface{}) (*gorm.DB, int, int) {
 	filter = f.toStruct(filter)
+
 	filterType := reflect.TypeOf(filter)
 	filterValue := reflect.ValueOf(filter)
 	query := f.db.Model(&model)
@@ -379,30 +381,10 @@ func (f *FilterService) CreateFilterPagination(filter interface{}, model interfa
 	if t.Kind() == reflect.Struct {
 		primaryTableName = query.NamingStrategy.TableName(t.Name())
 	}
-	// Iteriamo attraverso i campi della struttura
-	for i := 0; i < filterType.NumField(); i++ {
-		field := filterType.Field(i)
-		fieldValue := f.GetValue(filterValue.Field(i))
-		typeDbField := f.GetTypeField(filter, field.Tag.Get("json"))
 
-		if !f.checkEmpty(fieldValue, typeDbField) {
-			//logger.LogInfo(fmt.Sprintf("filter field %s, value %s", field.Name, fieldValue))
-			filterTypeTag := field.Tag.Get("filter")
-			filterFieldTag := field.Tag.Get("field_filter")
-			if filterFieldTag != "" {
-				relatedTableName, err := f.GetTableNameFromRelationField(model, field.Name)
-				if err != nil {
-					fmt.Println(err.Error())
-				}
-				many2manyTableName := f.extractMany2ManyTable(f.GetTagFromModelField(model, field.Tag.Get("json"), "gorm"))
-				query = f.getQueryForRelation(query, filterTypeMap[filterTypeTag], filterFieldTag, relatedTableName, fieldValue, many2manyTableName, primaryTableName)
-			} else {
-				if filterTypeMap[filterTypeTag] != SORTED && filterTypeMap[filterTypeTag] != SORTEDBY && filterTypeTag != "" {
-					query = f.getQuery(filterTypeMap[filterTypeTag], field.Name, fieldValue, query, primaryTableName)
-				}
-			}
-		}
-	}
+	// Iteriamo attraverso i campi della struttura
+	f.iterateStruct(filterType, filterValue, filter, model, query, primaryTableName)
+
 	_, found := filterType.FieldByName("Search")
 	if found {
 		search := f.GetValue(filterValue.FieldByName("Search")).(string)
@@ -411,7 +393,6 @@ func (f *FilterService) CreateFilterPagination(filter interface{}, model interfa
 			var orArgs []interface{}
 			for i := 0; i < filterType.NumField(); i++ {
 				field := filterType.Field(i)
-				//logger.LogInfo(fmt.Sprintf("filter field %s, value %s", field.Name, fieldValue))
 				filterTypeTag := field.Tag.Get("searchable")
 				if filterTypeTag == "1" {
 					columnName := f.db.NamingStrategy.ColumnName("", field.Name)
@@ -463,6 +444,43 @@ func (f *FilterService) CreateFilterPagination(filter interface{}, model interfa
 	query = query.Order(primaryTableName + "." + columnName + " " + sortOrder)
 
 	return query, page, size
+}
+
+func (f *FilterService) iterateStruct(
+	filterType reflect.Type, filterValue reflect.Value, filter, model interface{},
+	query *gorm.DB, primaryTableName string,
+) {
+	for i := 0; i < filterType.NumField(); i++ {
+		field := filterType.Field(i)
+		fieldValue := f.GetValue(filterValue.Field(i))
+
+		// Chiamata ricorsiva se viene trovata una embedded struct
+		if field.Anonymous {
+			f.iterateStruct(
+				reflect.TypeOf(fieldValue), reflect.ValueOf(fieldValue), fieldValue, model, query, primaryTableName,
+			)
+			continue
+		}
+
+		typeDbField := f.GetTypeField(filter, field.Tag.Get("json"))
+
+		if !f.checkEmpty(fieldValue, typeDbField) {
+			filterTypeTag := field.Tag.Get("filter")
+			filterFieldTag := field.Tag.Get("field_filter")
+			if filterFieldTag != "" {
+				relatedTableName, err := f.GetTableNameFromRelationField(model, field.Name)
+				if err != nil {
+					fmt.Println(err.Error())
+				}
+				many2manyTableName := f.extractMany2ManyTable(f.GetTagFromModelField(model, field.Tag.Get("json"), "gorm"))
+				query = f.getQueryForRelation(query, filterTypeMap[filterTypeTag], filterFieldTag, relatedTableName, fieldValue, many2manyTableName, primaryTableName)
+			} else {
+				if filterTypeMap[filterTypeTag] != SORTED && filterTypeMap[filterTypeTag] != SORTEDBY && filterTypeTag != "" {
+					query = f.getQuery(filterTypeMap[filterTypeTag], field.Name, fieldValue, query, primaryTableName)
+				}
+			}
+		}
+	}
 }
 
 func (f *FilterService) CreateFilter(filter interface{}, model interface{}) *gorm.DB {

@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+
 	"github.com/R3n3r0/filter-gorm/example/models"
 	"github.com/R3n3r0/filter-gorm/example/models/filter"
+	"github.com/R3n3r0/filter-gorm/example/models/filter/base_filters"
 	"github.com/R3n3r0/filter-gorm/example/repository"
 	"github.com/R3n3r0/filter-gorm/filter_helper"
 	"gorm.io/driver/sqlite"
@@ -108,7 +110,12 @@ func main() {
 	printUsers(getUsers)
 	fmt.Println("END FILTER FOR GROUP RELATED")
 	groupFilter3 := filter.GroupFilter{
-		ID: 1,
+		BaseNameFilter: base_filters.BaseNameFilter{
+			BaseIDFilter: base_filters.BaseIDFilter{
+				ID: 1,
+			},
+		},
+		//ID: 1,
 	}
 	getGroups, err := groupRepository.GetGroups(&groupFilter3)
 	if err != nil {
