@@ -156,8 +156,17 @@ shown:
 | `Page`      | `int`    | 1-based page number. Defaults to `1`.                   |
 | `Size`      | `int`    | Page size. Defaults to `10`.                            |
 
-`SortBy` / `SortOrder` are also tagged with `filter:"4"` / `filter:"5"` so they
-are skipped by the generic condition loop and handled by the ordering logic.
+`SortBy` / `SortOrder` are also tagged with `filter:"sort"` / `filter:"order"`
+(or `"4"` / `"5"`) so they are skipped by the generic condition loop and handled
+by the ordering logic.
+
+`SortBy` accepts **several columns** separated by commas, each optionally
+prefixed with `-` (descending) or `+` (ascending); columns without a prefix use
+`SortOrder`. Every column is validated against the schema.
+
+```go
+UserFilter{SortBy: "-created_at,name"} // ORDER BY created_at DESC, name ASC
+```
 
 ## Full text search (`searchable` tag)
 
@@ -264,6 +273,34 @@ repo.WithPreloads("Groups", "Posts").List(userFilter)
 
 ```json
 { "items": [], "total": 0, "page": 1, "size": 10, "total_pages": 0 }
+```
+
+The repository is context- and transaction-aware. `WithContext` and `WithTx`
+return a copy bound to the given context or transaction:
+
+```go
+page, err := repo.WithContext(ctx).List(userFilter)
+
+err = db.Transaction(func(tx *gorm.DB) error {
+    txRepo := repo.WithTx(tx)
+    if err := txRepo.Create(&user); err != nil {
+        return err
+    }
+    return txRepo.Create(&profile)
+})
+```
+
+## Validating a filter
+
+Misconfigured tags are normally ignored at runtime. `Validate` turns them into
+explicit errors — unknown `filter` values, `field_filter` on a non-relation, and
+columns (regular, searchable or related) that do not exist on the model. Call it
+once at startup or in a test to fail fast:
+
+```go
+if err := filterService.Validate(UserFilter{}, &User{}); err != nil {
+    log.Fatalf("invalid UserFilter: %v", err)
+}
 ```
 
 ## Binding filters from an HTTP request

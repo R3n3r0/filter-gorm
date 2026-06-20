@@ -79,7 +79,7 @@ type GroupFilter struct {
 }
 
 // setupDB creates an in memory database seeded with deterministic data.
-func setupDB(t *testing.T) (*gorm.DB, FilterService) {
+func setupDB(t testing.TB) (*gorm.DB, FilterService) {
 	t.Helper()
 
 	dsn := fmt.Sprintf("file:filter_test_%d?mode=memory&cache=shared", atomic.AddInt64(&dbCounter, 1))

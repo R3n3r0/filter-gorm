@@ -1,9 +1,13 @@
 package filter_helper
 
 import (
+	"context"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // AdvancedUserFilter exercises the readable tag aliases and the extra operators.
@@ -186,5 +190,90 @@ func TestBindQuery(t *testing.T) {
 	var users []User
 	if err := fs.CreateFilter(f, &User{}).Find(&users).Error; err != nil {
 		t.Fatalf("query with bound filter: %v", err)
+	}
+}
+
+func TestMultiColumnSort(t *testing.T) {
+	_, fs := setupDB(t)
+
+	// -active (desc) then -name (desc): alice (active) first, then carol, bob.
+	var users []User
+	if err := fs.CreateFilter(UserFilter{SortBy: "-active,-name"}, &User{}).Find(&users).Error; err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	got := names(users)
+	want := []string{"alice", "carol", "bob"}
+	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("multi-column sort = %v, want %v", got, want)
+	}
+}
+
+func TestValidate(t *testing.T) {
+	_, fs := setupDB(t)
+
+	if err := fs.Validate(UserFilter{}, &User{}); err != nil {
+		t.Fatalf("valid filter reported errors: %v", err)
+	}
+
+	type BadFilter struct {
+		Ghost  string `json:"ghost" filter:"like"`               // column does not exist
+		BadTag string `json:"bad" filter:"nope" column:"name"`   // unknown filter tag
+		NotRel string `json:"nr" filter:"like" field_filter:"x"` // not a relation
+	}
+	err := fs.Validate(BadFilter{}, &User{})
+	if err == nil {
+		t.Fatal("expected validation errors")
+	}
+	for _, want := range []string{"ghost", "unknown filter tag", "no relation"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("validation error %q missing %q", err.Error(), want)
+		}
+	}
+}
+
+func TestRepositoryContextAndTx(t *testing.T) {
+	db, _ := setupDB(t)
+	repo := NewRepository[User](db)
+
+	page, err := repo.WithContext(context.Background()).List(UserFilter{})
+	if err != nil {
+		t.Fatalf("list with context: %v", err)
+	}
+	if page.Total != 3 {
+		t.Fatalf("expected 3 users, got %d", page.Total)
+	}
+
+	// A failing transaction must roll back the insert.
+	wantErr := gorm.ErrInvalidData
+	_ = db.Transaction(func(tx *gorm.DB) error {
+		if err := repo.WithTx(tx).Create(&User{Name: "eve"}); err != nil {
+			t.Fatalf("create in tx: %v", err)
+		}
+		return wantErr
+	})
+	total, _ := repo.Count(UserFilter{})
+	if total != 3 {
+		t.Fatalf("rolled back tx should leave 3 users, got %d", total)
+	}
+
+	// A successful transaction commits.
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		return repo.WithTx(tx).Create(&User{Name: "frank"})
+	}); err != nil {
+		t.Fatalf("commit tx: %v", err)
+	}
+	total, _ = repo.Count(UserFilter{})
+	if total != 4 {
+		t.Fatalf("committed tx should leave 4 users, got %d", total)
+	}
+}
+
+func BenchmarkCreateFilter(b *testing.B) {
+	_, fs := setupDB(b)
+	filter := UserFilter{Groups: []uint{1, 2}, SortBy: "name", SortOrder: "desc", Size: 20}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = fs.CreateFilter(filter, &User{})
 	}
 }

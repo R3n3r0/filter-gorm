@@ -1,6 +1,7 @@
 package filter_helper
 
 import (
+	"context"
 	"math"
 
 	"gorm.io/gorm"
@@ -39,6 +40,26 @@ func (r *Repository[T]) WithPreloads(associations ...string) *Repository[T] {
 	clone := *r
 	clone.preloads = append([]string{}, associations...)
 	return &clone
+}
+
+// withDB returns a copy of the repository bound to a different *gorm.DB.
+func (r *Repository[T]) withDB(db *gorm.DB) *Repository[T] {
+	clone := *r
+	clone.db = db
+	clone.service = r.service.withDB(db)
+	return &clone
+}
+
+// WithContext returns a copy of the repository whose operations run with the
+// given context (for cancellation, deadlines and tracing).
+func (r *Repository[T]) WithContext(ctx context.Context) *Repository[T] {
+	return r.withDB(r.db.WithContext(ctx))
+}
+
+// WithTx returns a copy of the repository that runs every operation on the given
+// transaction handle, so it can take part in a larger unit of work.
+func (r *Repository[T]) WithTx(tx *gorm.DB) *Repository[T] {
+	return r.withDB(tx)
 }
 
 func (r *Repository[T]) withPreloads(query *gorm.DB) *gorm.DB {
