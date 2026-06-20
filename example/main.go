@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 
 	"github.com/R3n3r0/filter-gorm/example/models"
 	"github.com/R3n3r0/filter-gorm/example/models/filter"
@@ -68,58 +69,53 @@ func main() {
 		}
 	}
 
-	/*userFilter := filter.UserFilter{
-		Name:      "user1",
+	// Filter users that belong to one of the given group IDs (many2many relation).
+	userFilter := filter.UserFilter{
+		Groups:    []uint{1, 2},
 		SortBy:    "ID",
 		SortOrder: "ASC",
-		Page:      0,
+		Page:      1,
 		Size:      10,
 	}
+
+	fmt.Println("START FILTER FOR GROUP RELATED")
 	getUsers, err := userRepository.GetUsers(userFilter)
 	if err != nil {
 		panic(err)
 	}
 	printUsers(getUsers)
-	userFilter2 := filter.UserFilter{
-		Search:    "user1",
-		SortBy:    "ID",
-		SortOrder: "ASC",
-		Page:      0,
-		Size:      10,
-	}
-
-	getUsers, err = userRepository.GetUsers(userFilter2)
-	if err != nil {
-		panic(err)
-	}
-	printUsers(getUsers)*/
-	ff := []uint{1, 2}
-	userFilter3 := filter.UserFilter{
-		Groups:    ff,
-		SortBy:    "ID",
-		SortOrder: "ASC",
-		Page:      0,
-		Size:      10,
-	}
-
-	fmt.Println("START FILTER FOR GROUP RELATED")
-	getUsers, err := userRepository.GetUsers(userFilter3)
-	if err != nil {
-		panic(err)
-	}
-	printUsers(getUsers)
 	fmt.Println("END FILTER FOR GROUP RELATED")
-	groupFilter3 := filter.GroupFilter{
+
+	// Filter a group by its ID (declared in the embedded base filter).
+	groupFilter := filter.GroupFilter{
 		BaseNameFilter: base_filters.BaseNameFilter{
 			BaseIDFilter: base_filters.BaseIDFilter{
 				ID: 1,
 			},
 		},
-		//ID: 1,
 	}
-	getGroups, err := groupRepository.GetGroups(&groupFilter3)
+	getGroups, err := groupRepository.GetGroups(&groupFilter)
 	if err != nil {
 		panic(err)
 	}
 	printGroup(getGroups)
+
+	// Generic repository + query-string binding: build a filter straight from
+	// HTTP-style query parameters and get a paginated result with no per-model
+	// repository boilerplate.
+	fmt.Println("START GENERIC REPOSITORY")
+	userRepo := filter_helper.NewRepository[models.User](db, filter_helper.WithMaxSize(50))
+	values, _ := url.ParseQuery("size=2&sort_by=name&sort_order=asc")
+	var boundFilter filter.UserFilter
+	if err := filter_helper.BindQuery(values, &boundFilter); err != nil {
+		panic(err)
+	}
+	page, err := userRepo.WithPreloads("Groups").List(boundFilter)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("total=%d page=%d size=%d total_pages=%d items=%d\n",
+		page.Total, page.Page, page.Size, page.TotalPages, len(page.Items))
+	printUsers(page.Items)
+	fmt.Println("END GENERIC REPOSITORY")
 }
