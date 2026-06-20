@@ -28,10 +28,18 @@ type Group struct {
 	Permission   Permission `gorm:"foreignKey:PermissionID"`
 }
 
+type Post struct {
+	gorm.Model
+	Title  string
+	UserID uint
+}
+
 type User struct {
 	gorm.Model
 	Name   string
+	Active bool
 	Groups []Group `gorm:"many2many:user_groups;"`
+	Posts  []Post  // has many
 }
 
 // --- Test filters ----------------------------------------------------------
@@ -47,13 +55,16 @@ type BaseNameFilter struct {
 
 type UserFilter struct {
 	BaseNameFilter
-	CreatedAt *time.Time `json:"created_at" filter:"2"`
-	Groups    []uint     `json:"groups" filter:"7" field_filter:"id"`
-	SortBy    string     `json:"sort_by" filter:"4"`
-	SortOrder string     `json:"sort_order" filter:"5"`
-	Page      int        `json:"page"`
-	Size      int        `json:"size"`
-	Search    string     `json:"search"`
+	Active      *bool      `json:"active" filter:"1"`
+	CreatedFrom *time.Time `json:"created_from" filter:"2" column:"created_at"`
+	CreatedTo   *time.Time `json:"created_to" filter:"3" column:"created_at"`
+	Groups      []uint     `json:"groups" filter:"7" field_filter:"id"`
+	Posts       string     `json:"posts" filter:"0" field_filter:"title"` // has many relation
+	SortBy      string     `json:"sort_by" filter:"4"`
+	SortOrder   string     `json:"sort_order" filter:"5"`
+	Page        int        `json:"page"`
+	Size        int        `json:"size"`
+	Search      string     `json:"search"`
 }
 
 type GroupFilter struct {
@@ -85,7 +96,7 @@ func setupDB(t *testing.T) (*gorm.DB, FilterService) {
 	}
 	sqlDB.SetMaxOpenConns(1)
 	t.Cleanup(func() { sqlDB.Close() })
-	if err := db.AutoMigrate(&User{}, &Group{}, &Permission{}); err != nil {
+	if err := db.AutoMigrate(&User{}, &Group{}, &Permission{}, &Post{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 
@@ -104,9 +115,9 @@ func setupDB(t *testing.T) (*gorm.DB, FilterService) {
 	}
 
 	users := []User{
-		{Name: "alice", Groups: []Group{groups[0], groups[1]}},
-		{Name: "bob", Groups: []Group{groups[1]}},
-		{Name: "carol", Groups: []Group{groups[2]}},
+		{Name: "alice", Active: true, Groups: []Group{groups[0], groups[1]}, Posts: []Post{{Title: "hello world"}, {Title: "draft"}}},
+		{Name: "bob", Active: false, Groups: []Group{groups[1]}},
+		{Name: "carol", Active: false, Groups: []Group{groups[2]}, Posts: []Post{{Title: "carol world"}}},
 	}
 	for i := range users {
 		if err := db.Create(&users[i]).Error; err != nil {
@@ -217,6 +228,141 @@ func TestEmptyFilterReturnsAll(t *testing.T) {
 	}
 	if len(users) != 3 {
 		t.Fatalf("expected all 3 users, got %d", len(users))
+	}
+}
+
+// TestHasManyRelation guards correct join generation for has-many relations
+// (foreign key on the related table), which the string based implementation got
+// wrong.
+func TestHasManyRelation(t *testing.T) {
+	_, fs := setupDB(t)
+
+	var users []User
+	err := fs.CreateFilter(UserFilter{Posts: "world"}, &User{}).Find(&users).Error
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	// alice ("hello world") and carol ("carol world") have matching posts.
+	if len(users) != 2 {
+		t.Fatalf("expected 2 users with matching posts, got %v", names(users))
+	}
+}
+
+// TestPointerToZeroValue verifies that a pointer set to the zero value (false)
+// is still applied as a filter, unlike a plain bool.
+func TestPointerToZeroValue(t *testing.T) {
+	_, fs := setupDB(t)
+
+	inactive := false
+	var users []User
+	err := fs.CreateFilter(UserFilter{Active: &inactive}, &User{}).Find(&users).Error
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(users) != 2 {
+		t.Fatalf("expected 2 inactive users, got %v", names(users))
+	}
+
+	active := true
+	users = nil
+	if err := fs.CreateFilter(UserFilter{Active: &active}, &User{}).Find(&users).Error; err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(users) != 1 || users[0].Name != "alice" {
+		t.Fatalf("expected only alice active, got %v", names(users))
+	}
+}
+
+// TestRangeWithColumnOverride verifies that two filter fields can target the
+// same column (a BETWEEN-like range) through the `column` tag.
+func TestRangeWithColumnOverride(t *testing.T) {
+	_, fs := setupDB(t)
+
+	from := time.Now().Add(-time.Hour)
+	to := time.Now().Add(time.Hour)
+
+	var users []User
+	err := fs.CreateFilter(UserFilter{CreatedFrom: &from, CreatedTo: &to}, &User{}).
+		Find(&users).Error
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(users) != 3 {
+		t.Fatalf("expected all 3 users within range, got %d", len(users))
+	}
+
+	past := time.Now().Add(-2 * time.Hour)
+	users = nil
+	if err := fs.CreateFilter(UserFilter{CreatedTo: &past}, &User{}).Find(&users).Error; err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(users) != 0 {
+		t.Fatalf("expected no users created before two hours ago, got %d", len(users))
+	}
+}
+
+func TestCount(t *testing.T) {
+	db, fs := setupDB(t)
+
+	total, err := fs.Count(UserFilter{}, &User{})
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if total != 3 {
+		t.Fatalf("expected 3 users, got %d", total)
+	}
+
+	// Count must not be inflated by the many2many joins: alice belongs to two
+	// groups but must be counted once.
+	var editors Group
+	if err := db.Where("name = ?", "editors").First(&editors).Error; err != nil {
+		t.Fatalf("lookup group: %v", err)
+	}
+	total, err = fs.Count(UserFilter{Groups: []uint{editors.ID}}, &User{})
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("expected 2 users in editors group, got %d", total)
+	}
+}
+
+// TestSortOrderInjection ensures a malicious SortOrder cannot inject SQL and is
+// safely ignored (falls back to ascending).
+func TestSortOrderInjection(t *testing.T) {
+	_, fs := setupDB(t)
+
+	var users []User
+	err := fs.CreateFilter(UserFilter{
+		SortBy:    "name",
+		SortOrder: "asc; DROP TABLE users; --",
+	}, &User{}).Find(&users).Error
+	if err != nil {
+		t.Fatalf("query should not error: %v", err)
+	}
+	if len(users) != 3 {
+		t.Fatalf("expected 3 users, got %d", len(users))
+	}
+	// Ascending order by name: alice, bob, carol.
+	if users[0].Name != "alice" || users[2].Name != "carol" {
+		t.Fatalf("unexpected ordering: %v", names(users))
+	}
+}
+
+// TestSortByInjection ensures an unknown/malicious SortBy column falls back to
+// the primary key instead of being interpolated into the query.
+func TestSortByInjection(t *testing.T) {
+	_, fs := setupDB(t)
+
+	var users []User
+	err := fs.CreateFilter(UserFilter{
+		SortBy: "name; DROP TABLE users",
+	}, &User{}).Find(&users).Error
+	if err != nil {
+		t.Fatalf("query should not error: %v", err)
+	}
+	if len(users) != 3 {
+		t.Fatalf("expected 3 users, got %d", len(users))
 	}
 }
 

@@ -11,13 +11,30 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 )
 
 // FilterService builds GORM queries from filter structs using reflection.
 type FilterService struct {
 	db *gorm.DB
+}
+
+// schemaStore caches parsed GORM schemas across FilterService instances.
+var schemaStore sync.Map
+
+// parseSchema parses (and caches) the GORM schema of the given model so that
+// relations, table names and foreign keys are resolved exactly the way GORM
+// resolves them.
+func (f *FilterService) parseSchema(model interface{}) (*schema.Schema, error) {
+	return schema.Parse(model, &schemaStore, f.db.NamingStrategy)
+}
+
+// quoteColumn returns a backtick quoted "table"."column" identifier.
+func quoteColumn(table, column string) string {
+	return fmt.Sprintf("`%s`.`%s`", table, column)
 }
 
 // FilterType enumerates the kind of condition that can be applied to a field.
@@ -132,68 +149,56 @@ func (f *FilterService) GetTagFromModelField(t interface{}, name string, nameTag
 	return ""
 }
 
-func (f *FilterService) reflectTypeToName(model interface{}) string {
-	t := reflect.TypeOf(model)
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
-	}
-	return t.Name()
-}
-func (f *FilterService) getQueryForRelation(query *gorm.DB, filterType FilterType, fieldName string, relatedTableName string,
-	value interface{}, many2manyTableName string, primaryTableName string) *gorm.DB {
-	columnName := f.db.NamingStrategy.ColumnName("", fieldName)
-	// db.Joins("JOIN user_groups ON user_groups.user_id = users.id").
-	//   Joins("JOIN groups ON groups.id = user_groups.group_id").
-	//   Where("groups.name = ?", "Admin").
-	//   Find(&users)
-	//TODO verificare se già esistono le tabelle in join, se esistono aggiungere semplicemente la where
-	if many2manyTableName != "" {
-		// Join with the intermediate table; the key is expected to follow the
-		// standard GORM naming convention "<singular_table>_id".
-		query = query.Joins(fmt.Sprintf("JOIN `%s` ON %s=%s", many2manyTableName,
-			fmt.Sprintf("`%s`.%s", many2manyTableName, fmt.Sprintf("%s_id", primaryTableName[:len(primaryTableName)-1])),
-			fmt.Sprintf("`%s`.%s", primaryTableName, "id")))
-		primaryTableName = many2manyTableName
+// addRelationJoins adds the JOIN clauses required to reach the table referenced
+// by rel and returns the related table name. Join clauses are added only once
+// per relation (tracked through joined) so that filtering on several columns of
+// the same relation does not produce duplicate joins. It supports belongs-to,
+// has-one, has-many and many2many relations and derives every table, column and
+// foreign key from the parsed GORM schema (so irregular pluralization and
+// custom keys are handled correctly).
+func (f *FilterService) addRelationJoins(query *gorm.DB, rel *schema.Relationship, joined map[string]bool) (*gorm.DB, string) {
+	relatedTable := rel.FieldSchema.Table
+	if joined[rel.Name] {
+		return query, relatedTable
 	}
 
-	switch filterType {
-	case LIKE:
-		query = query.Joins(fmt.Sprintf("JOIN `%s` ON `%s`.%s=`%s`.%s", relatedTableName, relatedTableName, "id",
-			primaryTableName, fmt.Sprintf("%s_id", relatedTableName[:len(relatedTableName)-1]))).
-			Where(fmt.Sprintf("`%s`.%s LIKE ?", relatedTableName, columnName), "%"+value.(string)+"%")
-		break
-	case EXACT:
-		query = query.Joins(fmt.Sprintf("JOIN `%s` ON `%s`.%s=`%s`.%s", relatedTableName, relatedTableName, "id",
-			primaryTableName, fmt.Sprintf("%s_id", relatedTableName[:len(relatedTableName)-1]))).
-			Where(fmt.Sprintf("`%s`.%s = ?", relatedTableName, columnName), value)
-		break
-	case GT:
-		query = query.Joins(fmt.Sprintf("JOIN `%s` ON `%s`.%s=`%s`.%s", relatedTableName, relatedTableName, "id",
-			primaryTableName, fmt.Sprintf("%s_id", relatedTableName[:len(relatedTableName)-1]))).
-			Where(fmt.Sprintf("`%s`.%s >= ?", relatedTableName, columnName), value)
-		break
-	case LT:
-		query = query.Joins(fmt.Sprintf("JOIN `%s` ON `%s`.%s=`%s`.%s", relatedTableName, relatedTableName, "id",
-			primaryTableName, fmt.Sprintf("%s_id", relatedTableName[:len(relatedTableName)-1]))).
-			Where(fmt.Sprintf("`%s`.%s <= ?", relatedTableName, columnName), value)
-		break
-	case IN:
-		query = query.Joins(fmt.Sprintf("JOIN `%s` ON `%s`.%s=`%s`.%s", relatedTableName, relatedTableName, "id",
-			primaryTableName, fmt.Sprintf("%s_id", relatedTableName[:len(relatedTableName)-1]))).
-			Where(fmt.Sprintf("`%s`.%s IN (?)", relatedTableName, columnName), value)
-		break
-	default:
-		//panic("unhandled default case")
+	condition := func(ref *schema.Reference) string {
+		return fmt.Sprintf("%s = %s",
+			quoteColumn(ref.ForeignKey.Schema.Table, ref.ForeignKey.DBName),
+			quoteColumn(ref.PrimaryKey.Schema.Table, ref.PrimaryKey.DBName),
+		)
 	}
 
-	return query
+	if rel.JoinTable != nil {
+		// many2many: join the intermediate table first, then the related table.
+		joinTable := rel.JoinTable.Table
+		var ownConds, relatedConds []string
+		for _, ref := range rel.References {
+			if ref.OwnPrimaryKey {
+				ownConds = append(ownConds, condition(ref))
+			} else {
+				relatedConds = append(relatedConds, condition(ref))
+			}
+		}
+		query = query.
+			Joins(fmt.Sprintf("JOIN `%s` ON %s", joinTable, strings.Join(ownConds, " AND "))).
+			Joins(fmt.Sprintf("JOIN `%s` ON %s", relatedTable, strings.Join(relatedConds, " AND ")))
+	} else {
+		var conds []string
+		for _, ref := range rel.References {
+			conds = append(conds, condition(ref))
+		}
+		query = query.Joins(fmt.Sprintf("JOIN `%s` ON %s", relatedTable, strings.Join(conds, " AND ")))
+	}
+
+	joined[rel.Name] = true
+	return query, relatedTable
 }
 
 // getQuery applies a single condition on a column of the primary table.
 func (f *FilterService) getQuery(filterType FilterType, fieldName string, value interface{}, query *gorm.DB,
 	tableName string) *gorm.DB {
-	columnName := f.db.NamingStrategy.ColumnName("", fieldName)
-	columnName = fmt.Sprintf("`%s`.%s", tableName, columnName)
+	columnName := quoteColumn(tableName, f.db.NamingStrategy.ColumnName("", fieldName))
 	switch filterType {
 	case LIKE:
 		query = query.Where(columnName+" LIKE ?", "%"+value.(string)+"%")
@@ -211,154 +216,41 @@ func (f *FilterService) getQuery(filterType FilterType, fieldName string, value 
 	return query
 }
 
-func (f *FilterService) checkEmpty(value interface{}, typology reflect.Kind) bool {
-	result := false
-	switch typology {
-	case reflect.String:
-		if value.(string) == "" {
-			result = true
-		}
-		break
-	case reflect.Int:
-		if value.(int) == 0 {
-			result = true
-		}
-		break
-	case reflect.Int8:
-		if value.(int8) == 0 {
-			result = true
-		}
-		break
-	case reflect.Int16:
-		if value.(int16) == 0 {
-			result = true
-		}
-		break
-	case reflect.Int32:
-		if value.(int32) == 0 {
-			result = true
-		}
-		break
-	case reflect.Int64:
-		if value.(int64) == 0 {
-			result = true
-		}
-		break
-	case reflect.Float32:
-		if value.(float32) == 0.0 {
-			result = true
-		}
-		break
-	case reflect.Float64:
-		if value.(float64) == 0.0 {
-			result = true
-		}
-		break
-	case reflect.Bool:
-		if value.(bool) == false {
-			result = true
-		}
-		break
-	case reflect.Uint:
-		if value.(uint) == 0 {
-			result = true
-		}
-		break
-	case reflect.Uint8:
-		if value.(uint8) == 0 {
-			result = true
-		}
-		break
-	case reflect.Uint16:
-		if value.(uint16) == 0 {
-			result = true
-		}
-		break
-	case reflect.Uint32:
-		if value.(uint32) == 0 {
-			result = true
-		}
-		break
-	case reflect.Uint64:
-		if value.(uint64) == 0 {
-			result = true
-		}
-		break
-	case reflect.Ptr:
-		if value == nil {
-			result = true
-		}
-		break
-	case reflect.Struct:
-		if value == nil {
-			return true
-		}
-		break
-	case reflect.Slice:
-		v := reflect.ValueOf(value)
-		if v.Kind() == reflect.Array {
-			if v.Len() == 0 {
-				result = true
-			}
-		} else {
-			if v.Kind() == reflect.Slice {
-				if v.Len() == 0 || v.IsNil() {
-					result = true
-				}
-			}
-		}
-		break
-
+// checkEmpty reports whether value should be ignored by the filter. The decision
+// is driven by kind, which is the Kind of the filter struct field (not of the
+// dereferenced value):
+//
+//   - pointer fields are empty only when nil, so a pointer to a zero value
+//     (e.g. *bool pointing to false) is still applied;
+//   - slices, arrays and maps are empty when they have no elements;
+//   - every other kind (including non-pointer structs such as time.Time) is
+//     empty when it holds its zero value.
+func (f *FilterService) checkEmpty(value interface{}, kind reflect.Kind) bool {
+	if kind == reflect.Ptr {
+		return value == nil
+	}
+	if value == nil {
+		return true
+	}
+	v := reflect.ValueOf(value)
+	switch v.Kind() {
+	case reflect.Slice, reflect.Array, reflect.Map:
+		return v.Len() == 0
 	default:
-		//logger.LogInfo(fmt.Sprintf("type not recognized%s", typology))
-		result = true
-		break
-
+		return v.IsZero()
 	}
-	return result
-
-}
-
-// Funzione per estrarre la tabella intermedia dal tag GORM
-func (f *FilterService) extractMany2ManyTable(tag string) string {
-	prefix := "many2many:"
-	// Suddivide il tag in parti usando il separatore ";"
-	parts := strings.Split(tag, ";")
-
-	for _, part := range parts {
-		// Controlla se il parametro inizia con "many2many:"
-		if len(part) > len(prefix) && part[:len(prefix)] == prefix {
-			// Restituisci solo il valore del parametro "many2many:"
-			return part[len(prefix):]
-		}
-	}
-	return ""
 }
 
 // GetTableNameFromRelationField returns the table name of the model referenced
 // by the relation field fieldName. It returns an error when the field is not a
-// relation (struct or slice of structs).
+// relation. Resolution is delegated to the parsed GORM schema.
 func (f *FilterService) GetTableNameFromRelationField(model interface{}, fieldName string) (string, error) {
-	modelType := reflect.TypeOf(model)
-	if modelType.Kind() == reflect.Ptr {
-		modelType = modelType.Elem()
+	sch, err := f.parseSchema(model)
+	if err != nil {
+		return "", err
 	}
-	for i := 0; i < modelType.NumField(); i++ {
-		field := modelType.Field(i)
-		if field.Name == fieldName {
-			if field.Type.Kind() == reflect.Slice {
-				elemType := field.Type.Elem()
-				if elemType.Kind() == reflect.Struct {
-					return f.db.NamingStrategy.TableName(elemType.Name()), nil
-				}
-			} else {
-				if field.Type.Kind() == reflect.Struct {
-					return f.db.NamingStrategy.TableName(fieldName), nil
-				} else {
-					return "", errors.New("not relation in this field")
-				}
-			}
-		}
+	if rel, ok := sch.Relationships.Relations[fieldName]; ok {
+		return rel.FieldSchema.Table, nil
 	}
 	return "", errors.New("not relation in this field")
 }
@@ -386,79 +278,143 @@ func (f *FilterService) toStruct(val interface{}) interface{} {
 // and size, so the caller can reuse them (for example to build a paginated
 // response).
 func (f *FilterService) CreateFilterPagination(filter interface{}, model interface{}) (*gorm.DB, int, int) {
+	res := f.buildConditions(filter, model)
+	query := res.query
+
+	page, size := f.resolvePagination(res)
+	query = query.Limit(size).Offset((page - 1) * size)
+	query = f.applyOrder(query, res)
+
+	return query, page, size
+}
+
+// Count returns the number of records matching the filter, ignoring pagination
+// and ordering. When the filter joins related tables, rows are counted by
+// distinct primary key so that the joins do not inflate the total.
+func (f *FilterService) Count(filter interface{}, model interface{}) (int64, error) {
+	res := f.buildConditions(filter, model)
+	query := res.query
+
+	if res.schema != nil && res.schema.PrioritizedPrimaryField != nil && res.primaryTable != "" {
+		query = query.Distinct(quoteColumn(res.primaryTable, res.schema.PrioritizedPrimaryField.DBName))
+	}
+
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+// filterResult holds the state produced while turning a filter struct into a
+// query, so that pagination, ordering and counting can be applied afterwards.
+type filterResult struct {
+	query        *gorm.DB
+	filterType   reflect.Type
+	filterValue  reflect.Value
+	schema       *schema.Schema
+	primaryTable string
+}
+
+// buildConditions applies every WHERE condition, relation join and full text
+// search described by the filter, without pagination or ordering.
+func (f *FilterService) buildConditions(filter interface{}, model interface{}) filterResult {
 	filter = f.toStruct(filter)
 
-	filterType := reflect.TypeOf(filter)
-	filterValue := reflect.ValueOf(filter)
-	query := f.db.Model(&model)
-	t := reflect.TypeOf(model)
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
+	res := filterResult{
+		query:       f.db.Model(&model),
+		filterType:  reflect.TypeOf(filter),
+		filterValue: reflect.ValueOf(filter),
 	}
-	primaryTableName := ""
-	// Verifica se è una struct e restituisci il nome
-	if t.Kind() == reflect.Struct {
-		primaryTableName = query.NamingStrategy.TableName(t.Name())
+	if res.filterType == nil {
+		return res
 	}
 
-	// Iteriamo attraverso i campi della struttura
-	f.iterateStruct(filterType, filterValue, filter, model, query, primaryTableName)
+	if sch, err := f.parseSchema(model); err == nil {
+		res.schema = sch
+		res.primaryTable = sch.Table
+	}
 
-	_, found := filterType.FieldByName("Search")
-	if found {
-		search := f.GetValue(filterValue.FieldByName("Search")).(string)
-		if search != "" {
-			columns := f.collectSearchableColumns(filterType, primaryTableName)
+	joined := map[string]bool{}
+	res.query = f.iterateStruct(res.filterType, res.filterValue, res.query, res.schema, res.primaryTable, joined)
+
+	// Full text search across the searchable columns.
+	if _, ok := res.filterType.FieldByName("Search"); ok {
+		if search, _ := f.GetValue(res.filterValue.FieldByName("Search")).(string); search != "" {
+			columns := f.collectSearchableColumns(res.filterType, res.primaryTable)
 			if len(columns) > 0 {
-				var orConditions []string
-				var orArgs []interface{}
+				var conditions []string
+				var args []interface{}
 				for _, column := range columns {
-					orConditions = append(orConditions, column+" LIKE ?")
-					orArgs = append(orArgs, fmt.Sprintf("%%%s%%", search))
+					conditions = append(conditions, column+" LIKE ?")
+					args = append(args, fmt.Sprintf("%%%s%%", search))
 				}
-				query = query.Where(strings.Join(orConditions, " OR "), orArgs...)
+				res.query = res.query.Where(strings.Join(conditions, " OR "), args...)
 			}
 		}
 	}
 
-	page := 1
-	size := 10
-	_, found = filterType.FieldByName("Page")
-	if found {
-		page = f.GetValue(filterValue.FieldByName("Page")).(int)
-		if page <= 0 {
-			page = 1
-		}
-	}
-	_, found = filterType.FieldByName("Size")
-	if found {
-		size = f.GetValue(filterValue.FieldByName("Size")).(int)
-		if size <= 0 {
-			size = 10
-		}
-	}
-	query = query.Limit(size).Offset((page - 1) * size)
+	return res
+}
 
-	_, found = filterType.FieldByName("SortBy")
-	sortBy := "ID"
-	sortOrder := "asc"
-	if found {
-		sortBy = f.GetValue(filterValue.FieldByName("SortBy")).(string)
-		if sortBy == "" {
-			sortBy = "ID"
+// resolvePagination reads the Page and Size helper fields, applying defaults.
+func (f *FilterService) resolvePagination(res filterResult) (int, int) {
+	page, size := 1, 10
+	if res.filterType == nil {
+		return page, size
+	}
+	if _, ok := res.filterType.FieldByName("Page"); ok {
+		if p, ok := f.GetValue(res.filterValue.FieldByName("Page")).(int); ok && p > 0 {
+			page = p
 		}
 	}
-	_, found = filterType.FieldByName("SortOrder")
-	if found {
-		sortOrder = f.GetValue(filterValue.FieldByName("SortOrder")).(string)
-		if sortOrder == "" {
-			sortOrder = "asc"
+	if _, ok := res.filterType.FieldByName("Size"); ok {
+		if s, ok := f.GetValue(res.filterValue.FieldByName("Size")).(int); ok && s > 0 {
+			size = s
 		}
 	}
-	columnName := f.db.NamingStrategy.ColumnName("", sortBy)
-	query = query.Order(primaryTableName + "." + columnName + " " + sortOrder)
+	return page, size
+}
 
-	return query, page, size
+// applyOrder appends an ORDER BY clause. The direction is restricted to a
+// whitelist and the column is validated against the schema, so neither SortBy
+// nor SortOrder can be used to inject arbitrary SQL.
+func (f *FilterService) applyOrder(query *gorm.DB, res filterResult) *gorm.DB {
+	sortBy, sortOrder := "ID", "asc"
+	if res.filterType != nil {
+		if _, ok := res.filterType.FieldByName("SortBy"); ok {
+			if v, _ := f.GetValue(res.filterValue.FieldByName("SortBy")).(string); v != "" {
+				sortBy = v
+			}
+		}
+		if _, ok := res.filterType.FieldByName("SortOrder"); ok {
+			if v, _ := f.GetValue(res.filterValue.FieldByName("SortOrder")).(string); v != "" {
+				sortOrder = v
+			}
+		}
+	}
+
+	if strings.EqualFold(strings.TrimSpace(sortOrder), "desc") {
+		sortOrder = "desc"
+	} else {
+		sortOrder = "asc"
+	}
+
+	column := f.db.NamingStrategy.ColumnName("", sortBy)
+	if res.schema != nil {
+		if _, ok := res.schema.FieldsByDBName[column]; !ok {
+			if res.schema.PrioritizedPrimaryField != nil {
+				column = res.schema.PrioritizedPrimaryField.DBName
+			} else {
+				column = "id"
+			}
+		}
+	}
+
+	if res.primaryTable == "" {
+		return query.Order(column + " " + sortOrder)
+	}
+	return query.Order(quoteColumn(res.primaryTable, column) + " " + sortOrder)
 }
 
 // collectSearchableColumns returns the table qualified column names of every
@@ -490,42 +446,69 @@ func (f *FilterService) collectSearchableColumns(filterType reflect.Type, tableN
 }
 
 // iterateStruct walks the filter struct (recursing into embedded structs) and
-// applies every non empty field to the query according to its tags.
+// applies every non empty field to the query according to its tags. It returns
+// the resulting query.
+//
+// The column targeted by a field is, in order of precedence: the `field_filter`
+// tag (for relations), the `column` tag (to override the column name, e.g. to
+// build a range with two From/To fields on the same column), or the field name.
 func (f *FilterService) iterateStruct(
-	filterType reflect.Type, filterValue reflect.Value, filter, model interface{},
-	query *gorm.DB, primaryTableName string,
-) {
+	filterType reflect.Type, filterValue reflect.Value,
+	query *gorm.DB, sch *schema.Schema, primaryTable string, joined map[string]bool,
+) *gorm.DB {
 	for i := 0; i < filterType.NumField(); i++ {
 		field := filterType.Field(i)
-		fieldValue := f.GetValue(filterValue.Field(i))
 
-		// Chiamata ricorsiva se viene trovata una embedded struct
+		// Recurse into embedded structs (e.g. shared base filters).
 		if field.Anonymous {
-			f.iterateStruct(
-				reflect.TypeOf(fieldValue), reflect.ValueOf(fieldValue), fieldValue, model, query, primaryTableName,
-			)
+			value := filterValue.Field(i)
+			embedded := field.Type
+			if embedded.Kind() == reflect.Ptr {
+				if value.IsNil() {
+					continue
+				}
+				value = value.Elem()
+				embedded = embedded.Elem()
+			}
+			if embedded.Kind() == reflect.Struct {
+				query = f.iterateStruct(embedded, value, query, sch, primaryTable, joined)
+			}
 			continue
 		}
 
-		typeDbField := f.GetTypeField(filter, field.Tag.Get("json"))
-
-		if !f.checkEmpty(fieldValue, typeDbField) {
-			filterTypeTag := field.Tag.Get("filter")
-			filterFieldTag := field.Tag.Get("field_filter")
-			if filterFieldTag != "" {
-				relatedTableName, err := f.GetTableNameFromRelationField(model, field.Name)
-				if err != nil {
-					fmt.Println(err.Error())
-				}
-				many2manyTableName := f.extractMany2ManyTable(f.GetTagFromModelField(model, field.Tag.Get("json"), "gorm"))
-				query = f.getQueryForRelation(query, filterTypeMap[filterTypeTag], filterFieldTag, relatedTableName, fieldValue, many2manyTableName, primaryTableName)
-			} else {
-				if filterTypeMap[filterTypeTag] != SORTED && filterTypeMap[filterTypeTag] != SORTEDBY && filterTypeTag != "" {
-					query = f.getQuery(filterTypeMap[filterTypeTag], field.Name, fieldValue, query, primaryTableName)
-				}
-			}
+		fieldValue := f.GetValue(filterValue.Field(i))
+		if f.checkEmpty(fieldValue, field.Type.Kind()) {
+			continue
 		}
+
+		filterTypeVal, known := filterTypeMap[field.Tag.Get("filter")]
+		if !known || filterTypeVal == SORTED || filterTypeVal == SORTEDBY {
+			continue
+		}
+
+		// Filter on a related table.
+		if relColumn := field.Tag.Get("field_filter"); relColumn != "" {
+			if sch == nil {
+				continue
+			}
+			rel, ok := sch.Relationships.Relations[field.Name]
+			if !ok {
+				continue
+			}
+			var relatedTable string
+			query, relatedTable = f.addRelationJoins(query, rel, joined)
+			query = f.getQuery(filterTypeVal, relColumn, fieldValue, query, relatedTable)
+			continue
+		}
+
+		// Filter on a column of the primary table.
+		column := field.Tag.Get("column")
+		if column == "" {
+			column = field.Name
+		}
+		query = f.getQuery(filterTypeVal, column, fieldValue, query, primaryTable)
 	}
+	return query
 }
 
 // CreateFilter is a convenience wrapper around CreateFilterPagination that
