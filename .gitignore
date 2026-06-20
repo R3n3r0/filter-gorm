@@ -1,0 +1,14 @@
+# Test / example artifacts
+*.db
+*.sqlite
+*.sqlite3
+
+# Go build artifacts
+*.exe
+*.out
+*.test
+
+# Editor / OS files
+.idea/
+.vscode/
+.DS_Store
