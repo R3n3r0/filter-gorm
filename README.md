@@ -12,11 +12,16 @@ be executed with `Find`, `Count`, `Preload`, etc.
 
 - Declarative filters driven by struct tags.
 - `LIKE`, exact match, `>=`, `<=` and `IN` conditions.
-- Filtering on related tables through `has many`, `belongs to` and `many2many`
-  relations.
+- Filtering on related tables through `belongs to`, `has one`, `has many` and
+  `many2many` relations, with joins and foreign keys resolved from the GORM
+  schema (so irregular pluralization and custom keys are handled correctly).
 - Full text search across multiple columns (including columns declared in
   embedded/base filters).
-- Built-in pagination and sorting.
+- Built-in pagination, sorting and a `Count` helper.
+- Safe ordering: the sort direction is whitelisted and the sort column is
+  validated against the schema, so `SortBy`/`SortOrder` cannot inject SQL.
+- A code generator (`filtergen`) that produces filters and repository
+  scaffolding from your models.
 
 ## Installation
 
@@ -93,9 +98,28 @@ empty. The supported values are:
 > actual behaviour of the code (see `filter_helper/filter.go`).
 
 A field is considered *empty* (and therefore ignored) when it holds the zero
-value for its type: empty string, `0`, `false`, `nil` pointer, empty slice, etc.
-This is why optional filters such as dates are usually declared as pointers
-(`*time.Time`).
+value for its type: empty string, `0`, `false`, empty slice, etc. **Pointer
+fields are the exception**: they are only empty when `nil`, so a pointer to a
+zero value is still applied. Use pointers (`*bool`, `*int`, `*time.Time`, ...)
+whenever you need to filter explicitly by a zero value (for example `Active =
+false`).
+
+### Targeting a specific column (`column` tag)
+
+By default a field maps to the column with the same name. The `column` tag
+overrides this, which is mainly useful to build a range (`BETWEEN`-like) on a
+single column with two fields:
+
+```go
+type UserFilter struct {
+    CreatedFrom *time.Time `json:"created_from" filter:"2" column:"created_at"`
+    CreatedTo   *time.Time `json:"created_to"   filter:"3" column:"created_at"`
+}
+```
+
+```sql
+WHERE users.created_at >= ? AND users.created_at <= ?
+```
 
 ## Mandatory helper fields
 
@@ -160,10 +184,12 @@ WHERE `groups`.id IN (?)
 `field_filter` honours the same `filter` tag values as regular columns, so you
 can combine it with `LIKE`, exact match, ranges or `IN`.
 
-## Pagination
+## Pagination and counting
 
 `CreateFilter` applies pagination internally. When you need the resolved page and
-size (for example to build a paginated response), use `CreateFilterPagination`:
+size (for example to build a paginated response), use `CreateFilterPagination`.
+For the total number of matching rows (without pagination), use `Count`, which
+counts by distinct primary key so that joins do not inflate the total:
 
 ```go
 query, page, size := filterService.CreateFilterPagination(filter, &User{})
@@ -171,8 +197,7 @@ query, page, size := filterService.CreateFilterPagination(filter, &User{})
 var users []User
 query.Find(&users)
 
-var total int64
-filterService.CreateFilter(filter, &User{}).Count(&total)
+total, err := filterService.Count(filter, &User{})
 ```
 
 ## Reusing filters with embedded structs
@@ -212,6 +237,76 @@ fields they declare are applied as if they were defined directly on the filter.
   exception are the helper fields `Search`, `SortBy`, `SortOrder`, `Page` and
   `Size`.
 - Relations and join tables are resolved using GORM's default naming strategy.
+
+## Code generation
+
+Writing filter structs by hand is repetitive. The `filtergen` command parses
+your GORM models (via the Go AST, so it never builds or runs your code) and
+generates a `<Model>Filter` for each model, plus a shared `BaseModelFilter` and,
+optionally, repository scaffolding.
+
+Run it directly:
+
+```bash
+go run github.com/R3n3r0/filter-gorm/cmd/filtergen \
+    -models ./models -out ./models/filter -repos
+```
+
+or wire it into `go generate` by adding a directive next to your models:
+
+```go
+//go:generate go run github.com/R3n3r0/filter-gorm/cmd/filtergen -models . -out ../gen/filter -repos -repos-out ../gen/repository
+```
+
+```bash
+go generate ./...
+```
+
+### What it generates
+
+For each field of a model, `filtergen` emits a filter field using these
+heuristics:
+
+| Model field                         | Generated filter field                                |
+|-------------------------------------|-------------------------------------------------------|
+| `string`                            | `string` with `filter:"0"` (LIKE) + `searchable:"1"`  |
+| `bool`                              | `*bool` with `filter:"1"` (exact)                     |
+| numeric (`int`, `uint`, `float`, …) | `*<type>` with `filter:"1"` (exact)                   |
+| `time.Time`                         | a `*time.Time` `From`/`To` pair (range via `column`)  |
+| `[]Related` / `Related`             | `[]uint` with `filter:"7"` (IN) + `field_filter:"id"` |
+| embedded `gorm.Model`               | embeds the generated `BaseModelFilter`                |
+
+Every generated filter also gets the `SortBy`, `SortOrder`, `Page`, `Size` and
+`Search` helper fields.
+
+Tune the output from the model itself with the `filtergen` tag:
+
+```go
+type User struct {
+    gorm.Model
+    Name     string
+    Password string `filtergen:"-"` // never generate a filter for this field
+}
+```
+
+### Flags
+
+| Flag                    | Default                                          | Description                                       |
+|-------------------------|--------------------------------------------------|---------------------------------------------------|
+| `-models`               | `.`                                              | Directory containing the models.                  |
+| `-out`                  | `./filter`                                        | Output directory for the generated filters.       |
+| `-pkg`                  | `filter`                                          | Package name for the generated filters.           |
+| `-repos`                | `false`                                          | Also generate repository scaffolding.             |
+| `-repos-out`            | `./repository`                                    | Output directory for repositories.                |
+| `-repos-pkg`            | `repository`                                      | Package name for repositories.                    |
+| `-models-import`        | auto-detected from `go.mod`                       | Import path of the models package.                |
+| `-filter-import`        | auto-detected                                     | Import path of the generated filter package.      |
+| `-filter-helper-import` | `github.com/R3n3r0/filter-gorm/filter_helper`     | Import path of the `filter_helper` package.       |
+
+Generated files carry a `// Code generated by filtergen; DO NOT EDIT.` header and
+are meant to be regenerated. The repository implementation is a starting point
+you can adapt. A generated sample lives in
+[`example/gen`](./example/gen).
 
 ## Example
 
