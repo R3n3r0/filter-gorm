@@ -19,7 +19,28 @@ import (
 
 // FilterService builds GORM queries from filter structs using reflection.
 type FilterService struct {
-	db *gorm.DB
+	db          *gorm.DB
+	defaultSize int
+	maxSize     int
+}
+
+// Option customizes a FilterService.
+type Option func(*FilterService)
+
+// WithDefaultSize sets the page size used when a filter does not provide one
+// (or provides a non-positive value). Defaults to 10.
+func WithDefaultSize(size int) Option {
+	return func(f *FilterService) {
+		if size > 0 {
+			f.defaultSize = size
+		}
+	}
+}
+
+// WithMaxSize caps the page size a client can request. A value <= 0 disables the
+// cap. Defaults to 100.
+func WithMaxSize(size int) Option {
+	return func(f *FilterService) { f.maxSize = size }
 }
 
 // schemaStore caches parsed GORM schemas across FilterService instances.
@@ -49,25 +70,56 @@ const (
 	SORTEDBY                   // ordering direction (asc/desc)
 	SEARCH                     // full text search marker
 	IN                         // column IN (values)
+	ILIKE                      // case-insensitive LIKE
+	NOTIN                      // column NOT IN (values)
+	ISNULL                     // column IS NULL
+	NOTNULL                    // column IS NOT NULL
+	BETWEEN                    // column BETWEEN values[0] AND values[1]
 )
 
-// filterTypeMap maps the textual value of the `filter` struct tag to a
-// FilterType. The string keys correspond to the iota values above, so they must
-// be kept in sync with the const block.
+// filterTypeMap maps the value of the `filter` struct tag to a FilterType. Both
+// the historical numeric values and human readable aliases are accepted.
 var filterTypeMap = map[string]FilterType{
-	"0": LIKE,
-	"1": EXACT,
-	"2": GT,
-	"3": LT,
-	"4": SORTED,
-	"5": SORTEDBY,
-	"6": SEARCH,
-	"7": IN,
+	// numeric (kept for backward compatibility)
+	"0":  LIKE,
+	"1":  EXACT,
+	"2":  GT,
+	"3":  LT,
+	"4":  SORTED,
+	"5":  SORTEDBY,
+	"6":  SEARCH,
+	"7":  IN,
+	"8":  ILIKE,
+	"9":  NOTIN,
+	"10": ISNULL,
+	"11": NOTNULL,
+	"12": BETWEEN,
+	// readable aliases
+	"like":    LIKE,
+	"eq":      EXACT,
+	"exact":   EXACT,
+	"gte":     GT,
+	"ge":      GT,
+	"lte":     LT,
+	"le":      LT,
+	"sort":    SORTED,
+	"order":   SORTEDBY,
+	"search":  SEARCH,
+	"in":      IN,
+	"ilike":   ILIKE,
+	"notin":   NOTIN,
+	"isnull":  ISNULL,
+	"notnull": NOTNULL,
+	"between": BETWEEN,
 }
 
 // NewFilterService returns a FilterService bound to the given GORM connection.
-func NewFilterService(db *gorm.DB) FilterService {
-	return FilterService{db: db}
+func NewFilterService(db *gorm.DB, opts ...Option) FilterService {
+	f := FilterService{db: db, defaultSize: 10, maxSize: 100}
+	for _, opt := range opts {
+		opt(&f)
+	}
+	return f
 }
 
 // GetTypeField returns the reflect.Kind of the field whose database column name
@@ -201,7 +253,9 @@ func (f *FilterService) getQuery(filterType FilterType, fieldName string, value 
 	columnName := quoteColumn(tableName, f.db.NamingStrategy.ColumnName("", fieldName))
 	switch filterType {
 	case LIKE:
-		query = query.Where(columnName+" LIKE ?", "%"+value.(string)+"%")
+		query = query.Where(columnName+" LIKE ?", "%"+toString(value)+"%")
+	case ILIKE:
+		query = query.Where("LOWER("+columnName+") LIKE ?", "%"+strings.ToLower(toString(value))+"%")
 	case EXACT:
 		query = query.Where(columnName+" = ?", value)
 	case GT:
@@ -210,10 +264,37 @@ func (f *FilterService) getQuery(filterType FilterType, fieldName string, value 
 		query = query.Where(columnName+" <= ?", value)
 	case IN:
 		query = query.Where(columnName+" IN (?)", value)
+	case NOTIN:
+		query = query.Where(columnName+" NOT IN (?)", value)
+	case ISNULL:
+		query = query.Where(columnName + " IS NULL")
+	case NOTNULL:
+		query = query.Where(columnName + " IS NOT NULL")
+	case BETWEEN:
+		if lo, hi, ok := pair(value); ok {
+			query = query.Where(columnName+" BETWEEN ? AND ?", lo, hi)
+		}
 	default:
 		// Unsupported filter type for this field: ignore it.
 	}
 	return query
+}
+
+// toString best-effort converts a value to a string for LIKE patterns.
+func toString(value interface{}) string {
+	if s, ok := value.(string); ok {
+		return s
+	}
+	return fmt.Sprintf("%v", value)
+}
+
+// pair returns the first two elements of a slice/array value, used by BETWEEN.
+func pair(value interface{}) (interface{}, interface{}, bool) {
+	v := reflect.ValueOf(value)
+	if (v.Kind() == reflect.Slice || v.Kind() == reflect.Array) && v.Len() >= 2 {
+		return v.Index(0).Interface(), v.Index(1).Interface(), true
+	}
+	return nil, nil, false
 }
 
 // checkEmpty reports whether value should be ignored by the filter. The decision
@@ -357,9 +438,14 @@ func (f *FilterService) buildConditions(filter interface{}, model interface{}) f
 	return res
 }
 
-// resolvePagination reads the Page and Size helper fields, applying defaults.
+// resolvePagination reads the Page and Size helper fields, applying the
+// configured default size and capping the requested size at maxSize.
 func (f *FilterService) resolvePagination(res filterResult) (int, int) {
-	page, size := 1, 10
+	defaultSize := f.defaultSize
+	if defaultSize <= 0 {
+		defaultSize = 10
+	}
+	page, size := 1, defaultSize
 	if res.filterType == nil {
 		return page, size
 	}
@@ -372,6 +458,9 @@ func (f *FilterService) resolvePagination(res filterResult) (int, int) {
 		if s, ok := f.GetValue(res.filterValue.FieldByName("Size")).(int); ok && s > 0 {
 			size = s
 		}
+	}
+	if f.maxSize > 0 && size > f.maxSize {
+		size = f.maxSize
 	}
 	return page, size
 }

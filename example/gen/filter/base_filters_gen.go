@@ -7,9 +7,9 @@ import "time"
 // BaseModelFilter mirrors gorm.Model and is embedded in every generated filter
 // whose model embeds gorm.Model.
 type BaseModelFilter struct {
-	ID          *uint      `json:"id" filter:"1"`
-	CreatedFrom *time.Time `json:"created_from" filter:"2" column:"created_at"`
-	CreatedTo   *time.Time `json:"created_to" filter:"3" column:"created_at"`
-	UpdatedFrom *time.Time `json:"updated_from" filter:"2" column:"updated_at"`
-	UpdatedTo   *time.Time `json:"updated_to" filter:"3" column:"updated_at"`
+	ID          *uint      `json:"id" filter:"eq"`
+	CreatedFrom *time.Time `json:"created_from" filter:"gte" column:"created_at"`
+	CreatedTo   *time.Time `json:"created_to" filter:"lte" column:"created_at"`
+	UpdatedFrom *time.Time `json:"updated_from" filter:"gte" column:"updated_at"`
+	UpdatedTo   *time.Time `json:"updated_to" filter:"lte" column:"updated_at"`
 }

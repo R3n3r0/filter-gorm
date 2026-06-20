@@ -5,12 +5,12 @@ package filter
 // GroupFilter filters Group records.
 type GroupFilter struct {
 	BaseModelFilter
-	Name         string `json:"name" filter:"0" searchable:"1"`
-	PermissionID *uint  `json:"permission_id" filter:"1"`
-	Permission   []uint `json:"permission" filter:"7" field_filter:"id"`
+	Name         string `json:"name" filter:"like" searchable:"1"`
+	PermissionID *uint  `json:"permission_id" filter:"eq"`
+	Permission   []uint `json:"permission" filter:"in" field_filter:"id"`
 
-	SortBy    string `json:"sort_by" filter:"4"`
-	SortOrder string `json:"sort_order" filter:"5"`
+	SortBy    string `json:"sort_by" filter:"sort"`
+	SortOrder string `json:"sort_order" filter:"order"`
 	Page      int    `json:"page"`
 	Size      int    `json:"size"`
 	Search    string `json:"search"`
@@ -19,10 +19,10 @@ type GroupFilter struct {
 // PermissionFilter filters Permission records.
 type PermissionFilter struct {
 	BaseModelFilter
-	Name string `json:"name" filter:"0" searchable:"1"`
+	Name string `json:"name" filter:"like" searchable:"1"`
 
-	SortBy    string `json:"sort_by" filter:"4"`
-	SortOrder string `json:"sort_order" filter:"5"`
+	SortBy    string `json:"sort_by" filter:"sort"`
+	SortOrder string `json:"sort_order" filter:"order"`
 	Page      int    `json:"page"`
 	Size      int    `json:"size"`
 	Search    string `json:"search"`
@@ -31,11 +31,11 @@ type PermissionFilter struct {
 // UserFilter filters User records.
 type UserFilter struct {
 	BaseModelFilter
-	Name   string `json:"name" filter:"0" searchable:"1"`
-	Groups []uint `json:"groups" filter:"7" field_filter:"id"`
+	Name   string `json:"name" filter:"like" searchable:"1"`
+	Groups []uint `json:"groups" filter:"in" field_filter:"id"`
 
-	SortBy    string `json:"sort_by" filter:"4"`
-	SortOrder string `json:"sort_order" filter:"5"`
+	SortBy    string `json:"sort_by" filter:"sort"`
+	SortOrder string `json:"sort_order" filter:"order"`
 	Page      int    `json:"page"`
 	Size      int    `json:"size"`
 	Search    string `json:"search"`

@@ -29,8 +29,8 @@ func TestFieldToFilter(t *testing.T) {
 		wantLen  int
 		contains string
 	}{
-		{"Name", "string", 1, `filter:"0" searchable:"1"`},
-		{"Age", "int", 1, `filter:"1"`},
+		{"Name", "string", 1, `filter:"like" searchable:"1"`},
+		{"Age", "int", 1, `filter:"eq"`},
 		{"Active", "bool", 1, `*bool`},
 		{"Groups", "[]Group", 1, `field_filter:"id"`},
 		{"Permission", "Permission", 1, `field_filter:"id"`},

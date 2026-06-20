@@ -36,10 +36,11 @@ type Post struct {
 
 type User struct {
 	gorm.Model
-	Name   string
-	Active bool
-	Groups []Group `gorm:"many2many:user_groups;"`
-	Posts  []Post  // has many
+	Name     string
+	Active   bool
+	Nickname *string
+	Groups   []Group `gorm:"many2many:user_groups;"`
+	Posts    []Post  // has many
 }
 
 // --- Test filters ----------------------------------------------------------
@@ -114,8 +115,9 @@ func setupDB(t *testing.T) (*gorm.DB, FilterService) {
 		t.Fatalf("seed groups: %v", err)
 	}
 
+	nickname := "ally"
 	users := []User{
-		{Name: "alice", Active: true, Groups: []Group{groups[0], groups[1]}, Posts: []Post{{Title: "hello world"}, {Title: "draft"}}},
+		{Name: "alice", Active: true, Nickname: &nickname, Groups: []Group{groups[0], groups[1]}, Posts: []Post{{Title: "hello world"}, {Title: "draft"}}},
 		{Name: "bob", Active: false, Groups: []Group{groups[1]}},
 		{Name: "carol", Active: false, Groups: []Group{groups[2]}, Posts: []Post{{Title: "carol world"}}},
 	}

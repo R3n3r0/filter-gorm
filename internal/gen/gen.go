@@ -155,13 +155,13 @@ func fieldToFilter(name, typeStr string) ([]FilterField, bool) {
 		return []FilterField{{
 			Name: name,
 			Type: "[]uint",
-			Tag:  fmt.Sprintf("json:%q filter:\"7\" field_filter:\"id\"", jsonName),
+			Tag:  fmt.Sprintf("json:%q filter:\"in\" field_filter:\"id\"", jsonName),
 		}}, true
 	case isRelationType(elem):
 		return []FilterField{{
 			Name: name,
 			Type: "[]uint",
-			Tag:  fmt.Sprintf("json:%q filter:\"7\" field_filter:\"id\"", jsonName),
+			Tag:  fmt.Sprintf("json:%q filter:\"in\" field_filter:\"id\"", jsonName),
 		}}, true
 
 	// Time columns become a From/To range.
@@ -171,12 +171,12 @@ func fieldToFilter(name, typeStr string) ([]FilterField, bool) {
 			{
 				Name: name + "From",
 				Type: "*time.Time",
-				Tag:  fmt.Sprintf("json:%q filter:\"2\" column:%q", jsonName+"_from", col),
+				Tag:  fmt.Sprintf("json:%q filter:\"gte\" column:%q", jsonName+"_from", col),
 			},
 			{
 				Name: name + "To",
 				Type: "*time.Time",
-				Tag:  fmt.Sprintf("json:%q filter:\"3\" column:%q", jsonName+"_to", col),
+				Tag:  fmt.Sprintf("json:%q filter:\"lte\" column:%q", jsonName+"_to", col),
 			},
 		}, true
 
@@ -184,21 +184,21 @@ func fieldToFilter(name, typeStr string) ([]FilterField, bool) {
 		return []FilterField{{
 			Name: name,
 			Type: "string",
-			Tag:  fmt.Sprintf("json:%q filter:\"0\" searchable:\"1\"", jsonName),
+			Tag:  fmt.Sprintf("json:%q filter:\"like\" searchable:\"1\"", jsonName),
 		}}, true
 
 	case elem == "bool":
 		return []FilterField{{
 			Name: name,
 			Type: "*bool",
-			Tag:  fmt.Sprintf("json:%q filter:\"1\"", jsonName),
+			Tag:  fmt.Sprintf("json:%q filter:\"eq\"", jsonName),
 		}}, true
 
 	case basicTypes[elem]:
 		return []FilterField{{
 			Name: name,
 			Type: "*" + elem,
-			Tag:  fmt.Sprintf("json:%q filter:\"1\"", jsonName),
+			Tag:  fmt.Sprintf("json:%q filter:\"eq\"", jsonName),
 		}}, true
 	}
 
@@ -298,8 +298,8 @@ type {{ .Name }}Filter struct {
 	{{ .Name }} {{ .Type }} ` + "`{{ .Tag }}`" + `
 {{- end }}
 
-	SortBy    string ` + "`json:\"sort_by\" filter:\"4\"`" + `
-	SortOrder string ` + "`json:\"sort_order\" filter:\"5\"`" + `
+	SortBy    string ` + "`json:\"sort_by\" filter:\"sort\"`" + `
+	SortOrder string ` + "`json:\"sort_order\" filter:\"order\"`" + `
 	Page      int    ` + "`json:\"page\"`" + `
 	Size      int    ` + "`json:\"size\"`" + `
 	Search    string ` + "`json:\"search\"`" + `
@@ -326,11 +326,11 @@ import "time"
 // BaseModelFilter mirrors gorm.Model and is embedded in every generated filter
 // whose model embeds gorm.Model.
 type BaseModelFilter struct {
-	ID          *uint      ` + "`json:\"id\" filter:\"1\"`" + `
-	CreatedFrom *time.Time ` + "`json:\"created_from\" filter:\"2\" column:\"created_at\"`" + `
-	CreatedTo   *time.Time ` + "`json:\"created_to\" filter:\"3\" column:\"created_at\"`" + `
-	UpdatedFrom *time.Time ` + "`json:\"updated_from\" filter:\"2\" column:\"updated_at\"`" + `
-	UpdatedTo   *time.Time ` + "`json:\"updated_to\" filter:\"3\" column:\"updated_at\"`" + `
+	ID          *uint      ` + "`json:\"id\" filter:\"eq\"`" + `
+	CreatedFrom *time.Time ` + "`json:\"created_from\" filter:\"gte\" column:\"created_at\"`" + `
+	CreatedTo   *time.Time ` + "`json:\"created_to\" filter:\"lte\" column:\"created_at\"`" + `
+	UpdatedFrom *time.Time ` + "`json:\"updated_from\" filter:\"gte\" column:\"updated_at\"`" + `
+	UpdatedTo   *time.Time ` + "`json:\"updated_to\" filter:\"lte\" column:\"updated_at\"`" + `
 }
 `))
 

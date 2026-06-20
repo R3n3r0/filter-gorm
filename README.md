@@ -49,17 +49,21 @@ define a *filter* struct whose fields mirror the model columns:
 
 ```go
 type UserFilter struct {
-    Name      string     `json:"name" filter:"1" searchable:"1"`
-    CreatedAt *time.Time `json:"created_at" filter:"2"`
-    UpdatedAt *time.Time `json:"updated_at" filter:"2"`
-    Groups    []uint     `json:"groups" filter:"7" field_filter:"id"`
-    SortBy    string     `json:"sort_by" filter:"4"`
-    SortOrder string     `json:"sort_order" filter:"5"`
+    Name      string     `json:"name" filter:"like" searchable:"1"`
+    CreatedAt *time.Time `json:"created_at" filter:"gte"`
+    UpdatedAt *time.Time `json:"updated_at" filter:"gte"`
+    Groups    []uint     `json:"groups" filter:"in" field_filter:"id"`
+    SortBy    string     `json:"sort_by" filter:"sort"`
+    SortOrder string     `json:"sort_order" filter:"order"`
     Page      int        `json:"page"`
     Size      int        `json:"size"`
     Search    string     `json:"search"`
 }
 ```
+
+> The `filter` tag accepts both readable aliases (`like`, `eq`, `in`, …) and the
+> historical numeric values (`"0"`, `"1"`, `"7"`, …). They are equivalent; the
+> aliases are recommended for readability.
 
 and apply it to a query:
 
@@ -83,19 +87,36 @@ methods (`Preload`, `Joins`, `Count`, ...) before running the query.
 The `filter` tag selects the SQL condition applied when the field is **not**
 empty. The supported values are:
 
-| Tag value | Condition          | Generated SQL                  |
-|-----------|--------------------|--------------------------------|
-| `0`       | LIKE               | `column LIKE '%value%'`        |
-| `1`       | Exact match        | `column = value`               |
-| `2`       | Greater or equal   | `column >= value`              |
-| `3`       | Less or equal      | `column <= value`              |
-| `4`       | Sort column        | used in `ORDER BY` (see below) |
-| `5`       | Sort direction     | used in `ORDER BY` (see below) |
-| `7`       | One of (IN)        | `column IN (values)`           |
+| Alias     | Numeric | Condition           | Generated SQL                  |
+|-----------|---------|---------------------|--------------------------------|
+| `like`    | `0`     | LIKE                | `column LIKE '%value%'`        |
+| `eq`      | `1`     | Exact match         | `column = value`               |
+| `gte`     | `2`     | Greater or equal    | `column >= value`              |
+| `lte`     | `3`     | Less or equal       | `column <= value`              |
+| `sort`    | `4`     | Sort column         | used in `ORDER BY` (see below) |
+| `order`   | `5`     | Sort direction      | used in `ORDER BY` (see below) |
+| `in`      | `7`     | One of (IN)         | `column IN (values)`           |
+| `ilike`   | `8`     | Case-insensitive LIKE | `LOWER(column) LIKE LOWER(?)` |
+| `notin`   | `9`     | Not one of          | `column NOT IN (values)`       |
+| `isnull`  | `10`    | Is null             | `column IS NULL`               |
+| `notnull` | `11`    | Is not null         | `column IS NOT NULL`           |
+| `between` | `12`    | Between two bounds   | `column BETWEEN ? AND ?`       |
 
-> **Note:** value `0` is `LIKE` and value `1` is *exact match*. Earlier
-> documentation listed these the other way around — the table above reflects the
-> actual behaviour of the code (see `filter_helper/filter.go`).
+> **Note:** `eq` (`"1"`) is *exact match* and `like` (`"0"`) is `LIKE`. Very
+> early documentation listed these the other way around — the table above
+> reflects the actual behaviour of the code.
+
+`isnull` / `notnull` are triggered by presence: declare the field as a pointer
+(e.g. `*bool`) and set it to apply the condition (the value itself is ignored).
+`between` takes a slice with two elements (`[]time.Time{from, to}`).
+
+```go
+type UserFilter struct {
+    Name      string      `json:"name" filter:"ilike"`                 // case-insensitive
+    NoAvatar  *bool       `json:"no_avatar" filter:"isnull" column:"avatar"`
+    Created   []time.Time `json:"created" filter:"between" column:"created_at"`
+}
+```
 
 A field is considered *empty* (and therefore ignored) when it holds the zero
 value for its type: empty string, `0`, `false`, empty slice, etc. **Pointer
@@ -112,8 +133,8 @@ single column with two fields:
 
 ```go
 type UserFilter struct {
-    CreatedFrom *time.Time `json:"created_from" filter:"2" column:"created_at"`
-    CreatedTo   *time.Time `json:"created_to"   filter:"3" column:"created_at"`
+    CreatedFrom *time.Time `json:"created_from" filter:"gte" column:"created_at"`
+    CreatedTo   *time.Time `json:"created_to"   filter:"lte" column:"created_at"`
 }
 ```
 
@@ -200,18 +221,90 @@ query.Find(&users)
 total, err := filterService.Count(filter, &User{})
 ```
 
+### Service options
+
+`NewFilterService` accepts options to control pagination defaults:
+
+```go
+filterService := filter_helper.NewFilterService(db,
+    filter_helper.WithDefaultSize(20), // page size when none is provided (default 10)
+    filter_helper.WithMaxSize(100),    // cap on the page size a client can ask for (default 100)
+)
+```
+
+`WithMaxSize` protects your database from a client requesting an enormous page;
+pass `0` to disable the cap.
+
+## Generic repository
+
+For CRUD APIs, `Repository[T]` removes the per-model boilerplate. It wires a
+`FilterService` to standard CRUD operations and returns a ready-to-serialize
+paginated result:
+
+```go
+repo := filter_helper.NewRepository[User](db, filter_helper.WithMaxSize(50))
+
+page, err := repo.List(userFilter) // *Page[User]{ Items, Total, Page, Size, TotalPages }
+
+user, err := repo.FindByID(42)
+err = repo.Create(&User{Name: "alice"})
+err = repo.Update(42, User{Name: "bob"})
+err = repo.Delete(42)
+total, err := repo.Count(userFilter)
+```
+
+Eager-load associations with `WithPreloads`, which returns a copy of the
+repository:
+
+```go
+repo.WithPreloads("Groups", "Posts").List(userFilter)
+```
+
+`Page[T]` is JSON-friendly:
+
+```json
+{ "items": [], "total": 0, "page": 1, "size": 10, "total_pages": 0 }
+```
+
+## Binding filters from an HTTP request
+
+`BindQuery` populates a filter from URL query parameters, matching each field by
+its `json` tag. It is the bridge between an HTTP handler and the repository:
+
+```go
+func listUsers(w http.ResponseWriter, r *http.Request) {
+    var f UserFilter
+    if err := filter_helper.BindQuery(r.URL.Query(), &f); err != nil {
+        http.Error(w, err.Error(), http.StatusBadRequest)
+        return
+    }
+
+    page, err := repo.List(f) // ?name=al&groups=1,2&page=2&size=20&sort_by=name&sort_order=desc
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
+    json.NewEncoder(w).Encode(page)
+}
+```
+
+Supported field kinds: string, bool, all int/uint/float kinds, `time.Time`
+(`RFC3339` or `YYYY-MM-DD`), pointers to any of these, and slices of them. Slice
+values may be repeated (`?id=1&id=2`) or comma separated (`?id=1,2`). Embedded
+base filters are traversed too.
+
 ## Reusing filters with embedded structs
 
 Common fields can be factored out into base filters and embedded:
 
 ```go
 type BaseIDFilter struct {
-    ID uint `json:"id" filter:"1"`
+    ID uint `json:"id" filter:"eq"`
 }
 
 type BaseNameFilter struct {
     BaseIDFilter
-    Name string `json:"name" filter:"1" searchable:"1"`
+    Name string `json:"name" filter:"like" searchable:"1"`
 }
 
 type UserFilter struct {

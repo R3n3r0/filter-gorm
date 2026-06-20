@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 
 	"github.com/R3n3r0/filter-gorm/example/models"
 	"github.com/R3n3r0/filter-gorm/example/models/filter"
@@ -98,4 +99,23 @@ func main() {
 		panic(err)
 	}
 	printGroup(getGroups)
+
+	// Generic repository + query-string binding: build a filter straight from
+	// HTTP-style query parameters and get a paginated result with no per-model
+	// repository boilerplate.
+	fmt.Println("START GENERIC REPOSITORY")
+	userRepo := filter_helper.NewRepository[models.User](db, filter_helper.WithMaxSize(50))
+	values, _ := url.ParseQuery("size=2&sort_by=name&sort_order=asc")
+	var boundFilter filter.UserFilter
+	if err := filter_helper.BindQuery(values, &boundFilter); err != nil {
+		panic(err)
+	}
+	page, err := userRepo.WithPreloads("Groups").List(boundFilter)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("total=%d page=%d size=%d total_pages=%d items=%d\n",
+		page.Total, page.Page, page.Size, page.TotalPages, len(page.Items))
+	printUsers(page.Items)
+	fmt.Println("END GENERIC REPOSITORY")
 }
