@@ -53,9 +53,26 @@ func (f *FilterService) parseSchema(model interface{}) (*schema.Schema, error) {
 	return schema.Parse(model, &schemaStore, f.db.NamingStrategy)
 }
 
-// quoteColumn returns a backtick quoted "table"."column" identifier.
-func quoteColumn(table, column string) string {
-	return fmt.Sprintf("`%s`.`%s`", table, column)
+// quoteColumn returns a "table"."column" identifier quoted for the DIALECT of
+// the service's connection: backticks on MySQL, double quotes on PostgreSQL and
+// SQLite.
+//
+// It used to hardcode backticks, which are valid MySQL syntax only: on
+// PostgreSQL every filtered query that touched a relation failed with a syntax
+// error. The bug stayed hidden because the consuming applications ran their
+// tests on SQLite, which tolerates backticks. Delegating to the Dialector uses
+// the same mechanism GORM itself quotes identifiers with.
+func (f *FilterService) quoteColumn(table, column string) string {
+	var sb strings.Builder
+	f.db.Dialector.QuoteTo(&sb, table+"."+column)
+	return sb.String()
+}
+
+// quoteTable quotes a bare table name for the connection's dialect.
+func (f *FilterService) quoteTable(table string) string {
+	var sb strings.Builder
+	f.db.Dialector.QuoteTo(&sb, table)
+	return sb.String()
 }
 
 // FilterType enumerates the kind of condition that can be applied to a field.
@@ -223,8 +240,8 @@ func (f *FilterService) addRelationJoins(query *gorm.DB, rel *schema.Relationshi
 
 	condition := func(ref *schema.Reference) string {
 		return fmt.Sprintf("%s = %s",
-			quoteColumn(ref.ForeignKey.Schema.Table, ref.ForeignKey.DBName),
-			quoteColumn(ref.PrimaryKey.Schema.Table, ref.PrimaryKey.DBName),
+			f.quoteColumn(ref.ForeignKey.Schema.Table, ref.ForeignKey.DBName),
+			f.quoteColumn(ref.PrimaryKey.Schema.Table, ref.PrimaryKey.DBName),
 		)
 	}
 
@@ -240,14 +257,14 @@ func (f *FilterService) addRelationJoins(query *gorm.DB, rel *schema.Relationshi
 			}
 		}
 		query = query.
-			Joins(fmt.Sprintf("JOIN `%s` ON %s", joinTable, strings.Join(ownConds, " AND "))).
-			Joins(fmt.Sprintf("JOIN `%s` ON %s", relatedTable, strings.Join(relatedConds, " AND ")))
+			Joins(fmt.Sprintf("JOIN %s ON %s", f.quoteTable(joinTable), strings.Join(ownConds, " AND "))).
+			Joins(fmt.Sprintf("JOIN %s ON %s", f.quoteTable(relatedTable), strings.Join(relatedConds, " AND ")))
 	} else {
 		var conds []string
 		for _, ref := range rel.References {
 			conds = append(conds, condition(ref))
 		}
-		query = query.Joins(fmt.Sprintf("JOIN `%s` ON %s", relatedTable, strings.Join(conds, " AND ")))
+		query = query.Joins(fmt.Sprintf("JOIN %s ON %s", f.quoteTable(relatedTable), strings.Join(conds, " AND ")))
 	}
 
 	joined[rel.Name] = true
@@ -257,7 +274,7 @@ func (f *FilterService) addRelationJoins(query *gorm.DB, rel *schema.Relationshi
 // applyCondition applies a single condition on the already-resolved db column of
 // the given table.
 func (f *FilterService) applyCondition(query *gorm.DB, filterType FilterType, table, dbColumn string, value interface{}) *gorm.DB {
-	columnName := quoteColumn(table, dbColumn)
+	columnName := f.quoteColumn(table, dbColumn)
 	switch filterType {
 	case LIKE:
 		query = query.Where(columnName+" LIKE ?", "%"+toString(value)+"%")
@@ -384,7 +401,7 @@ func (f *FilterService) Count(filter interface{}, model interface{}) (int64, err
 	query := res.query
 
 	if res.schema != nil && res.schema.PrioritizedPrimaryField != nil && res.primaryTable != "" {
-		query = query.Distinct(quoteColumn(res.primaryTable, res.schema.PrioritizedPrimaryField.DBName))
+		query = query.Distinct(f.quoteColumn(res.primaryTable, res.schema.PrioritizedPrimaryField.DBName))
 	}
 
 	var total int64
@@ -454,7 +471,7 @@ func (f *FilterService) buildConditions(filter interface{}, model interface{}) f
 				var conditions []string
 				var args []interface{}
 				for _, column := range res.plan.searchColumns {
-					conditions = append(conditions, quoteColumn(res.primaryTable, column)+" LIKE ?")
+					conditions = append(conditions, f.quoteColumn(res.primaryTable, column)+" LIKE ?")
 					args = append(args, fmt.Sprintf("%%%s%%", search))
 				}
 				res.query = res.query.Where(strings.Join(conditions, " OR "), args...)
@@ -561,7 +578,7 @@ func (f *FilterService) qualify(table, column string) string {
 	if table == "" {
 		return column
 	}
-	return quoteColumn(table, column)
+	return f.quoteColumn(table, column)
 }
 
 // CreateFilter is a convenience wrapper around CreateFilterPagination that
